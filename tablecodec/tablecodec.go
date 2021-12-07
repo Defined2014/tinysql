@@ -43,6 +43,7 @@ const (
 	RecordRowKeyLen       = prefixLen + idLen /*handle*/
 	tablePrefixLength     = 1
 	recordPrefixSepLength = 2
+	indexPrefixSepLength  = 2
 )
 
 // TableSplitKeyLen is the length of key 't{table_id}' which is used for table split.
@@ -71,8 +72,32 @@ func EncodeRowKeyWithHandle(tableID int64, handle int64) kv.Key {
 
 // DecodeRecordKey decodes the key and gets the tableID, handle.
 func DecodeRecordKey(key kv.Key) (tableID int64, handle int64, err error) {
-	/* Your code here */
-	return
+	if len(key) <= prefixLen {
+		return 0, 0, errInvalidRecordKey.GenWithStack("invalid record key - %q", key)
+	}
+
+	k := key
+	if !hasTablePrefix(key) {
+		return 0, 0, errInvalidRecordKey.GenWithStack("invalid record key - %q", k)
+	}
+
+	key = key[tablePrefixLength:]
+	key, tableID, err = codec.DecodeInt(key)
+	if err != nil {
+		return 0, 0, errors.Trace(err)
+	}
+
+	if !hasRecordPrefixSep(key) {
+		return 0, 0, errInvalidRecordKey.GenWithStack("invalid record key - %q", k)
+	}
+
+	key = key[recordPrefixSepLength:]
+	var intHandle int64
+	key, intHandle, err = codec.DecodeInt(key)
+	if err != nil {
+		return 0, 0, errors.Trace(err)
+	}
+	return tableID, intHandle, nil
 }
 
 // appendTableIndexPrefix appends table index prefix  "t[tableID]_i".
@@ -94,51 +119,56 @@ func EncodeIndexSeekKey(tableID int64, idxID int64, encodedValue []byte) kv.Key 
 
 // DecodeIndexKeyPrefix decodes the key and gets the tableID, indexID, indexValues.
 func DecodeIndexKeyPrefix(key kv.Key) (tableID int64, indexID int64, indexValues []byte, err error) {
-	/* Your code here */
-	return tableID, indexID, indexValues, nil
+	if len(key) <= prefixLen {
+		return 0, 0, nil, errInvalidRecordKey.GenWithStack("invalid index key - %q", key)
+	}
+
+	k := key
+	if !hasTablePrefix(key) {
+		return 0, 0, nil, errInvalidRecordKey.GenWithStack("invalid index key - %q", k)
+	}
+
+	key = key[tablePrefixLength:]
+	key, tableID, err = codec.DecodeInt(key)
+	if err != nil {
+		return 0, 0, nil, errors.Trace(err)
+	}
+
+	if !hasIndexPrefixSep(key) {
+		return 0, 0, nil, errInvalidRecordKey.GenWithStack("invalid index key - %q", k)
+	}
+
+	key = key[indexPrefixSepLength:]
+	key, indexID, err = codec.DecodeInt(key)
+	if err != nil {
+		return 0, 0, nil, errors.Trace(err)
+	}
+
+	return tableID, indexID, key, nil
 }
 
 // DecodeIndexKey decodes the key and gets the tableID, indexID, indexValues.
 func DecodeIndexKey(key kv.Key) (tableID int64, indexID int64, indexValues []string, err error) {
 	k := key
 
-	tableID, indexID, isRecord, err := DecodeKeyHead(key)
+	tableID, indexID, key, err = DecodeIndexKeyPrefix(key)
 	if err != nil {
 		return 0, 0, nil, errors.Trace(err)
 	}
-	if isRecord {
-		err = errInvalidIndexKey.GenWithStack("invalid index key - %q", k)
-		return 0, 0, nil, err
-	}
-	indexKey := key[prefixLen+idLen:]
-	indexValues, err = DecodeValuesBytesToStrings(indexKey)
-	if err != nil {
-		err = errInvalidIndexKey.GenWithStack("invalid index key - %q %v", k, err)
-		return 0, 0, nil, err
-	}
-	return tableID, indexID, indexValues, nil
-}
-
-// DecodeValuesBytesToStrings decode the raw bytes to strings for each columns.
-// FIXME: Without the schema information, we can only decode the raw kind of
-// the column. For instance, MysqlTime is internally saved as uint64.
-func DecodeValuesBytesToStrings(b []byte) ([]string, error) {
-	var datumValues []string
-	for len(b) > 0 {
-		remain, d, e := codec.DecodeOne(b)
+	for len(key) > 0 {
+		remain, d, e := codec.DecodeOne(key)
 		if e != nil {
-			return nil, e
+			return 0, 0, nil, errInvalidIndexKey.GenWithStack("invalid index key - %q %v", k, e)
 		}
 		str, e1 := d.ToString()
 		if e1 != nil {
-			return nil, e
+			return 0, 0, nil, errInvalidIndexKey.GenWithStack("invalid index key - %q %v", k, e1)
 		}
-		datumValues = append(datumValues, str)
-		b = remain
+		indexValues = append(indexValues, str)
+		key = remain
 	}
-	return datumValues, nil
+	return
 }
-
 
 // EncodeRow encode row data and column ids into a slice of byte.
 // Row layout: colID1, value1, colID2, value2, .....
@@ -178,6 +208,10 @@ func hasTablePrefix(key kv.Key) bool {
 
 func hasRecordPrefixSep(key kv.Key) bool {
 	return key[0] == recordPrefixSep[0] && key[1] == recordPrefixSep[1]
+}
+
+func hasIndexPrefixSep(key kv.Key) bool {
+	return key[0] == indexPrefixSep[0] && key[1] == indexPrefixSep[1]
 }
 
 // DecodeMetaKey decodes the key and get the meta key and meta field.
